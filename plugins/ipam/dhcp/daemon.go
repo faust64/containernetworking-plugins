@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -50,6 +51,32 @@ func newDHCP() *DHCP {
 	}
 }
 
+func generateClientID(args *skel.CmdArgs, netName string) string {
+	podNamespace := ""
+	podName := ""
+	args_splited := strings.Split(args.Args , ";")
+	for _, arg := range args_splited {
+		arg_splited := strings.Split(arg , "=")
+		arg_key := arg_splited[0]
+		if arg_key == "K8S_POD_NAMESPACE" {
+			podNamespace = arg_splited[1]
+		} else if arg_key == "K8S_POD_NAME" {
+			podName = arg_splited[1]
+		}
+		if podName != "" && podNamespace != "" {
+			break
+		}
+	}
+	if podName == "" {
+		podName = args.ContainerID
+	}
+	if podNamespace == "" {
+		podNamespace = "default"
+	}
+
+	return podNamespace + "/" + podName + "/" + netName + "/" + args.IfName
+}
+
 // Allocate acquires an IP from a DHCP server for a specified container.
 // The acquired lease will be maintained until Release() is called.
 func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
@@ -58,7 +85,7 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 		return fmt.Errorf("error parsing netconf: %v", err)
 	}
 
-	clientID := args.ContainerID + "/" + conf.Name
+	clientID := generateClientID(args, conf.Name)
 	hostNetns := d.hostNetnsPrefix + args.Netns
 	l, err := AcquireLease(clientID, hostNetns, args.IfName)
 	if err != nil {
@@ -91,20 +118,21 @@ func (d *DHCP) Release(args *skel.CmdArgs, reply *struct{}) error {
 		return fmt.Errorf("error parsing netconf: %v", err)
 	}
 
-	if l := d.getLease(args.ContainerID, conf.Name); l != nil {
+	clientID := generateClientID(args, conf.Name)
+	if l := d.getLease(clientID); l != nil {
 		l.Stop()
-		d.clearLease(args.ContainerID, conf.Name)
+		d.clearLease(clientID)
 	}
 
 	return nil
 }
 
-func (d *DHCP) getLease(contID, netName string) *DHCPLease {
+func (d *DHCP) getLease(clientID string) *DHCPLease {
 	d.mux.Lock()
 	defer d.mux.Unlock()
 
 	// TODO(eyakubovich): hash it to avoid collisions
-	l, ok := d.leases[contID+netName]
+	l, ok := d.leases[clientID]
 	if !ok {
 		return nil
 	}
@@ -119,12 +147,12 @@ func (d *DHCP) setLease(contID, netName string, l *DHCPLease) {
 	d.leases[contID+netName] = l
 }
 
-func (d *DHCP) clearLease(contID, netName string) {
+func (d *DHCP) clearLease(clientID string) {
 	d.mux.Lock()
 	defer d.mux.Unlock()
 
 	// TODO(eyakubovich): hash it to avoid collisions
-	delete(d.leases, contID+netName)
+	delete(d.leases, clientID)
 }
 
 func getListener() (net.Listener, error) {
