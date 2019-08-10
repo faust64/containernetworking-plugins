@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -50,8 +51,30 @@ func newDHCP() *DHCP {
 	}
 }
 
-func generateClientID(containerID string, netName string, ifName string) string {
-	return containerID + "/" + netName + "/" + ifName
+func generateClientID(args *skel.CmdArgs, netName string) string {
+	podNamespace := ""
+	podName := ""
+	args_splited := strings.Split(args.Args , ";")
+	for _, arg := range args_splited {
+		arg_splited := strings.Split(arg , "=")
+		arg_key := arg_splited[0]
+		if arg_key == "K8S_POD_NAMESPACE" {
+			podNamespace = arg_splited[1]
+		} else if arg_key == "K8S_POD_NAME" {
+			podName = arg_splited[1]
+		}
+		if podName != "" && podNamespace != "" {
+			break
+		}
+	}
+	if podName == "" {
+		podName = args.ContainerID
+	}
+	if podNamespace == "" {
+		podNamespace = "default"
+	}
+
+	return podNamespace + "/" + podName + "/" + netName + "/" + args.IfName
 }
 
 // Allocate acquires an IP from a DHCP server for a specified container.
@@ -62,7 +85,7 @@ func (d *DHCP) Allocate(args *skel.CmdArgs, result *current.Result) error {
 		return fmt.Errorf("error parsing netconf: %v", err)
 	}
 
-	clientID := generateClientID(args.ContainerID, conf.Name, args.IfName)
+	clientID := generateClientID(args, conf.Name)
 	hostNetns := d.hostNetnsPrefix + args.Netns
 	l, err := AcquireLease(clientID, hostNetns, args.IfName)
 	if err != nil {
@@ -95,7 +118,7 @@ func (d *DHCP) Release(args *skel.CmdArgs, reply *struct{}) error {
 		return fmt.Errorf("error parsing netconf: %v", err)
 	}
 
-	clientID := generateClientID(args.ContainerID, conf.Name, args.IfName)
+	clientID := generateClientID(args, conf.Name)
 	if l := d.getLease(clientID); l != nil {
 		l.Stop()
 		d.clearLease(clientID)
